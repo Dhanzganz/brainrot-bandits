@@ -87,8 +87,9 @@ local function billboard(name: string, size: UDim2, offset: Vector3, parent: Ins
 	gui.Name = name
 	gui.Size = size
 	gui.StudsOffsetWorldSpace = offset
-	gui.AlwaysOnTop = true
+	gui.AlwaysOnTop = false
 	gui.LightInfluence = 0
+	gui.MaxDistance = 90
 	gui.Parent = parent
 	return gui
 end
@@ -276,7 +277,7 @@ function World.build(): { [string]: any }
 		-- Owner sign: billboard on a beam showing the owner's display name
 		-- (or FOR RENT while unclaimed).
 		local beam = part("SignBeam", Vector3.new(0.6, 7, 0.6), Vector3.new(center.X, 4.5, center.Z), Color3.fromRGB(60, 60, 65), Enum.Material.Metal, folder)
-		local signGui = billboard("OwnerSign", UDim2.fromOffset(320, 90), Vector3.new(0, 8.2, 0), beam)
+		local signGui = billboard("OwnerSign", UDim2.fromOffset(208, 58), Vector3.new(0, 8.2, 0), beam)
 		local signFrame = Instance.new("Frame")
 		signFrame.Size = UDim2.new(1, 0, 1, 0)
 		signFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
