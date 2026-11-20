@@ -166,7 +166,7 @@ Config.Mutations = {
 -- Economy
 --------------------------------------------------------------------------------
 
-Config.StartingCash = 250
+Config.StartingCash = 300
 
 -- Rebirth costs in order; income multiplier = 1 + Rebirths.
 Config.RebirthCosts = { 10000, 50000, 250000, 1000000, 5000000, 25000000 }
