@@ -156,6 +156,17 @@ local function makeFlower(parent: Instance, position: Vector3, color: Color3)
 	_ = stem
 end
 
+-- Flat stone walkway from one ground point to another (width 5, height
+-- 0.12). centreY is the part's centre height; the strip is rotated so its
+-- length runs from fromPos to toPos.
+local function makePath(parent: Instance, fromPos: Vector3, toPos: Vector3, centreY: number)
+	local mid = Vector3.new((fromPos.X + toPos.X) / 2, centreY, (fromPos.Z + toPos.Z) / 2)
+	local length = (Vector3.new(toPos.X, 0, toPos.Z) - Vector3.new(fromPos.X, 0, fromPos.Z)).Magnitude
+	local path = part("Path", Vector3.new(5, 0.12, length), mid, Color3.fromRGB(208, 200, 190), Enum.Material.Cobblestone, parent)
+	path.CFrame = CFrame.lookAt(mid, Vector3.new(toPos.X, centreY, toPos.Z))
+	return path
+end
+
 --------------------------------------------------------------------------------
 -- build()
 --------------------------------------------------------------------------------
@@ -208,6 +219,21 @@ function World.build(): { [string]: any }
 		chevron.Material = Enum.Material.Neon
 		chevron.CFrame = CFrame.new(chevron.Position) * CFrame.Angles(0, math.rad(90), 0)
 	end
+	-- Outer glow trim: neon strips on the ground beside the belt, with
+	-- short glowing posts every ~20 studs. Purely decorative (no collision)
+	-- so crossing to the lane is never blocked.
+	for _, side in ipairs({ -1, 1 }) do
+		local strip = part("LaneTrim", Vector3.new(laneLength, 0.3, 0.5), Vector3.new(laneCenterX, 0.65, lane.Z + side * (lane.Width / 2 + 0.75)), Color3.fromRGB(60, 220, 255), Enum.Material.Neon, arena)
+		strip.CanCollide = false
+		for i = 0, 9 do
+			local px = lane.FromX + 5 + i * 20
+			local post = cylinder("LanePost", 0.3, 2.2, Vector3.new(px, 1.6, lane.Z + side * (lane.Width / 2 + 2.5)), Color3.fromRGB(50, 50, 55), arena)
+			post.CanCollide = false
+			local glow = ball("LanePostGlow", 0.7, Vector3.new(px, 2.95, lane.Z + side * (lane.Width / 2 + 2.5)), Color3.fromRGB(180, 240, 255), arena)
+			glow.Material = Enum.Material.Neon
+			glow.CanCollide = false
+		end
+	end
 
 	---------------------------------------------------------------------------
 	-- Spawn gate: two pillars and a big arch reading BRAINROT BANDITS.
@@ -235,6 +261,10 @@ function World.build(): { [string]: any }
 		arrow.Material = Enum.Material.Neon
 		arrow.CFrame = CFrame.new(arrow.Position) * CFrame.Angles(0, math.rad(90), 0)
 	end
+
+	-- Stone path across the plaza: shrine medallion edge -> lane edge.
+	-- It lies on the plaza surface (top 0.7, just above the plaza's 0.62).
+	makePath(arena, Vector3.new(0, 0, 12.5), Vector3.new(0, 0, 7.2), 0.64)
 
 	---------------------------------------------------------------------------
 	-- Six player bases around the ring.
@@ -327,6 +357,15 @@ function World.build(): { [string]: any }
 		local plantPos = baseCFrame:PointToWorldSpace(plantLocal)
 		makeTree(folder, Vector3.new(plantPos.X, 1, plantPos.Z), 0.7)
 
+		-- Stone path from the central plaza edge to this base's plot edge
+		-- (top 0.58, just above the grass). It slides under the plaza
+		-- medallion, stands and boards on the way — all of those sit higher.
+		local outDir = Vector3.new(center.X, 0, center.Z)
+		if outDir.Magnitude > 0.01 then
+			local unit = outDir / outDir.Magnitude
+			makePath(arena, unit * 36.5, center - unit * 14, 0.52)
+		end
+
 		table.insert(bases, {
 			CFrame = baseCFrame,
 			Plot = plot,
@@ -340,10 +379,27 @@ function World.build(): { [string]: any }
 	-- Rebirth shrine (middle of the arena, south of the lane).
 	---------------------------------------------------------------------------
 	local shrinePos = Config.ShrinePosition
+	-- Paved medallion under the shrine area (top 0.62, level with the
+	-- central plaza so the two read as one paved ground).
+	local shrinePlaza = cylinder("ShrinePlaza", 44, 0.25, Vector3.new(shrinePos.X, 0.495, shrinePos.Z), Color3.fromRGB(208, 200, 190), arena)
+	shrinePlaza.Material = Enum.Material.Cobblestone
 	local shrineFolder = Instance.new("Folder")
 	shrineFolder.Name = "RebirthShrine"
 	shrineFolder.Parent = arena
 	local shrineBase = cylinder("ShrineBase", 10, 0.8, Vector3.new(shrinePos.X, 1.0, shrinePos.Z), Color3.fromRGB(255, 200, 40), shrineFolder)
+	-- Purple neon plinth ring under the gold base (sits on the medallion).
+	local shrineRing = cylinder("ShrineRing", 13, 0.3, Vector3.new(shrinePos.X, 0.77, shrinePos.Z), Color3.fromRGB(170, 80, 255), shrineFolder)
+	shrineRing.Material = Enum.Material.Neon
+	-- Four mini pillars on the ring's diagonal points (diagonals keep the
+	-- spawn pad south of the shrine clear), gold with pink neon finials.
+	for _, off in ipairs({ { 3.54, 3.54 }, { 3.54, -3.54 }, { -3.54, 3.54 }, { -3.54, -3.54 } }) do
+		local px = shrinePos.X + off[1]
+		local pz = shrinePos.Z + off[2]
+		local mini = cylinder("ShrineMiniPillar", 0.8, 3, Vector3.new(px, 2.42, pz), Color3.fromRGB(255, 200, 40), shrineFolder)
+		mini.Material = Enum.Material.Metal
+		local finial = ball("ShrineFinial", 0.9, Vector3.new(px, 4.35, pz), Color3.fromRGB(255, 110, 200), shrineFolder)
+		finial.Material = Enum.Material.Neon
+	end
 	local shrinePillar = cylinder("ShrinePillar", 4, 5, Vector3.new(shrinePos.X, 3.5, shrinePos.Z), Color3.fromRGB(170, 80, 255), shrineFolder)
 	local shrineOrb = ball("ShrineOrb", 3, Vector3.new(shrinePos.X, 7.5, shrinePos.Z), Color3.fromRGB(255, 110, 200), shrineFolder)
 	shrineOrb.Material = Enum.Material.Neon
@@ -398,6 +454,14 @@ function World.build(): { [string]: any }
 	richestFolder.Name = "RichestBoard"
 	richestFolder.Parent = arena
 	local richestBack = part("BoardBack", Vector3.new(12, 8, 0.6), Vector3.new(richestPos.X, 5, richestPos.Z), Color3.fromRGB(35, 35, 45), Enum.Material.Wood, richestFolder)
+	-- Gold trim frame behind the board face and two support posts, so the
+	-- board stands finished instead of floating as a bare slab.
+	local richestFrame = part("BoardFrame", Vector3.new(13, 9, 0.3), Vector3.new(richestPos.X, 5, richestPos.Z + 0.45), Color3.fromRGB(255, 200, 40), Enum.Material.Metal, richestFolder)
+	_ = richestFrame
+	for _, side in ipairs({ -1, 1 }) do
+		local post = part("BoardPost", Vector3.new(0.8, 8, 0.8), Vector3.new(richestPos.X + side * 4, 4.5, richestPos.Z + 0.5), Color3.fromRGB(60, 60, 65), Enum.Material.Metal, richestFolder)
+		_ = post
+	end
 	local richestGui = Instance.new("SurfaceGui")
 	richestGui.Name = "RichestGui"
 	richestGui.Face = Enum.NormalId.Front
@@ -492,6 +556,8 @@ function World.build(): { [string]: any }
 		Vector3.new(70, 0, 45), Vector3.new(-45, 0, 70), Vector3.new(50, 0, 72),
 		Vector3.new(-95, 0, -20), Vector3.new(95, 0, 20), Vector3.new(20, 0, -85),
 		Vector3.new(-25, 0, 88),
+		Vector3.new(85, 0, 70), Vector3.new(-85, 0, -70), Vector3.new(15, 0, 95),
+		Vector3.new(-15, 0, -95),
 	}
 	for i, spot in ipairs(treeSpots) do
 		makeTree(decor, spot, 0.9 + (i % 3) * 0.2)
@@ -499,6 +565,7 @@ function World.build(): { [string]: any }
 	local rockSpots = {
 		Vector3.new(-85, 0, 60), Vector3.new(85, 0, -55), Vector3.new(-40, 0, -80),
 		Vector3.new(40, 0, 85), Vector3.new(100, 0, -5),
+		Vector3.new(105, 0, 45), Vector3.new(-105, 0, -45), Vector3.new(0, 0, 105),
 	}
 	for i, spot in ipairs(rockSpots) do
 		makeRock(decor, spot, 0.8 + (i % 2) * 0.4)
@@ -561,9 +628,76 @@ function World.build(): { [string]: any }
 		local fz = math.sin(angle) * 42
 		makeFlower(decor, Vector3.new(fx, 0.62, fz), flowerColors[((i - 1) % 4) + 1])
 	end
+	-- Second flower ring, slightly further out. Spots that would land on
+	-- the conveyor lane (angles 0 and 180) or on a base path (which the
+	-- +Z path also covers for the spawn pad) are skipped.
+	for i = 1, 16 do
+		local angle = (i - 1) * (math.pi * 2 / 16)
+		if math.abs(math.sin(angle)) > 0.2 then
+			local fx = math.cos(angle) * 45.5
+			local fz = math.sin(angle) * 45.5
+			local onPath = false
+			for _, baseAngle in ipairs(Config.BaseAngles) do
+				local rad = math.rad(baseAngle)
+				local ux, uz = math.cos(rad), math.sin(rad)
+				local proj = fx * ux + fz * uz
+				local perp = math.abs(fx * uz - fz * ux)
+				if proj >= 35 and proj <= 67 and perp < 3.2 then
+					onPath = true
+					break
+				end
+			end
+			if not onPath then
+				makeFlower(decor, Vector3.new(fx, 0.5, fz), flowerColors[(i % 4) + 1])
+			end
+		end
+	end
+	-- Flower patches: clusters of five bright balls around the plaza and
+	-- paths. Spots keep clear of the lane strip, the base plots and the
+	-- spawn pad; the balls never collide.
+	local patchSpots = {
+		Vector3.new(38, 0, 18), Vector3.new(38, 0, -18),
+		Vector3.new(-38, 0, 18), Vector3.new(-38, 0, -18),
+		Vector3.new(24, 0, 30), Vector3.new(-24, 0, 30),
+		Vector3.new(28, 0, -28), Vector3.new(-28, 0, -28),
+		Vector3.new(10, 0, -52), Vector3.new(-10, 0, -52),
+		Vector3.new(14, 0, 58), Vector3.new(-14, 0, 58),
+	}
+	local patchOffsets = {
+		Vector3.new(0, 0, 0), Vector3.new(1.2, 0, 0.4), Vector3.new(-1.1, 0, 0.6),
+		Vector3.new(0.4, 0, -1.2), Vector3.new(-0.5, 0, -1.1),
+	}
+	for s, spot in ipairs(patchSpots) do
+		for j, off in ipairs(patchOffsets) do
+			local d = 0.5 + ((s + j) % 3) * 0.1
+			local bloomBall = ball("FlowerPatch", d, Vector3.new(spot.X + off.X, 0.5 + d * 0.35, spot.Z + off.Z), flowerColors[((s + j - 2) % 4) + 1], decor)
+			bloomBall.Material = Enum.Material.Neon
+			bloomBall.CanCollide = false
+		end
+	end
 	for i = 1, 6 do
 		local stone = cylinder("SteppingStone" .. i, 3, 0.3, Vector3.new(-20 + i * 5, 0.75, 26 + (i % 2) * 2), Color3.fromRGB(180, 180, 185), decor)
 		stone.Material = Enum.Material.Slate
+	end
+
+	---------------------------------------------------------------------------
+	-- Lighting polish: warm late-afternoon defaults for the whole place.
+	-- The Atmosphere reuses the "BanditsAtmosphere" name so the client's
+	-- Effects.SetupLighting finds and reuses this instance instead of
+	-- stacking a second one.
+	---------------------------------------------------------------------------
+	local Lighting = game:GetService("Lighting")
+	Lighting.Brightness = 2.2
+	Lighting.ClockTime = 14.5
+	Lighting.Ambient = Color3.fromRGB(120, 110, 100)
+	Lighting.OutdoorAmbient = Color3.fromRGB(140, 135, 125)
+	if not Lighting:FindFirstChildOfClass("Atmosphere") then
+		local atmo = Instance.new("Atmosphere")
+		atmo.Name = "BanditsAtmosphere"
+		atmo.Density = 0.22
+		atmo.Haze = 1.2
+		atmo.Color = Color3.fromRGB(255, 240, 220)
+		atmo.Parent = Lighting
 	end
 
 	---------------------------------------------------------------------------

@@ -108,6 +108,10 @@ local BOSS_INTERVAL = Config.BossInterval
 local BOSS_HEALTH = Config.BossHealth
 local EVENT_INTERVAL = Config.EventInterval
 local EVENT_DURATION = Config.EventDuration
+local SWEEP_INTERVAL = Config.Sweep.Interval
+local SWEEP_WARN_TIME = Config.Sweep.WarnTime
+local SWEEP_CROSS_TIME = Config.Sweep.CrossTime
+local SWEEP_SAFE_RADIUS = Config.Sweep.SafeRadius
 local CARRY_SLOWDOWN = Config.CarrySlowMultiplier
 local DATASTORE_NAME = "BrainrotBandits_v1"
 
@@ -1681,6 +1685,93 @@ task.spawn(function()
 	while true do
 		task.wait(BOSS_INTERVAL)
 		spawnBoss()
+	end
+end)
+
+-- Sheriff Sweep: a red wall crosses the arena along +X every
+-- SWEEP_INTERVAL seconds. Anyone it passes who is not within
+-- SWEEP_SAFE_RADIUS of their own base centre is busted: they drop what
+-- they carry and are sent home.
+local sweepWall = Instance.new("Part")
+sweepWall.Name = "SheriffSweepWall"
+sweepWall.Size = Vector3.new(4, 40, 400)
+sweepWall.Color = Color3.fromRGB(255, 40, 40)
+sweepWall.Material = Enum.Material.Neon
+sweepWall.Transparency = 1
+sweepWall.Anchored = true
+sweepWall.CanCollide = false
+sweepWall.CanTouch = false
+sweepWall.CanQuery = false
+sweepWall.CFrame = CFrame.new(-190, -60, 0)
+sweepWall.Parent = workspace
+
+local function sweepIsSafe(player, data, hrp)
+	if not data or not data.baseIndex then
+		return false
+	end
+	local base = world.Bases[data.baseIndex]
+	if not base or not base.CFrame then
+		return false
+	end
+	local centre = base.CFrame.Position
+	local dx = hrp.Position.X - centre.X
+	local dz = hrp.Position.Z - centre.Z
+	return (dx * dx + dz * dz) <= SWEEP_SAFE_RADIUS * SWEEP_SAFE_RADIUS
+end
+
+local function sweepBust(player)
+	local data = playerData[player]
+	if not data then
+		return
+	end
+	if data.carrying then
+		dropCarried(player, nil)
+	end
+	teleportToBase(player)
+	fx(player, "busted", nil)
+end
+
+task.spawn(function()
+	while true do
+		task.wait(SWEEP_INTERVAL)
+		fxAll("sweepWarn", nil)
+		task.wait(SWEEP_WARN_TIME)
+		local caught = {}
+		local steps = math.max(1, math.floor(SWEEP_CROSS_TIME / 0.1))
+		sweepWall.Transparency = 0.35
+		for s = 0, steps do
+			local wallX = -190 + 380 * (s / steps)
+			sweepWall.CFrame = CFrame.new(wallX, 20, 0)
+			for _, player in ipairs(Players:GetPlayers()) do
+				if not caught[player] then
+					local ok, passed = pcall(function()
+						local data = playerData[player]
+						if not data then
+							return false
+						end
+						local char = player.Character
+						local hrp = char and char:FindFirstChild("HumanoidRootPart")
+						local hum = char and char:FindFirstChildOfClass("Humanoid")
+						if not hrp or not hum or hum.Health <= 0 then
+							return false
+						end
+						return hrp.Position.X <= wallX
+					end)
+					if ok and passed then
+						caught[player] = true
+						local data = playerData[player]
+						local char = player.Character
+						local hrp = char and char:FindFirstChild("HumanoidRootPart")
+						if data and hrp and not sweepIsSafe(player, data, hrp) then
+							pcall(sweepBust, player)
+						end
+					end
+				end
+			end
+			task.wait(0.1)
+		end
+		sweepWall.Transparency = 1
+		sweepWall.CFrame = CFrame.new(-190, -60, 0)
 	end
 end)
 
