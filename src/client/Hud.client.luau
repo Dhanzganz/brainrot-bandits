@@ -23,6 +23,7 @@ local ShopBuy = ReplicatedStorage:WaitForChild("ShopBuy")
 local SFX_IDS = {
 	pickup = 26723422,
 	cash = 12221990,
+	buy = 12221990, -- buy reuses the verified cash-register id
 	slap = 12222152,
 	rebirth = 12222253,
 	event = 86260684,
@@ -39,16 +40,16 @@ local EMOTES = {
 	Laugh = { Id = 507770818, Loop = false },
 }
 
-local ADMIN_ACTIONS = {
-	"cash", "cashbig", "legendary", "spawnmythic", "spawndiamond", "spawn5",
-	"rainbow", "mythic", "boss", "endevent", "speed", "rebirth", "tphome", "tplane",
-}
-
 local SHOP_ITEMS = {
 	{ Key = "Speed", Name = "Sepatu Kilat", Desc = "+4 kecepatan per level" },
 	{ Key = "Glove", Name = "Sarung Tinju Baja", Desc = "Slap lebih kuat (sekali beli)" },
 	{ Key = "Luck", Name = "Jimat Hoki", Desc = "+8% peluang per level" },
 }
+
+-- The shop rows are keyed by the ShopBuy action names, but Config.Shop
+-- names its entries differently (Shoes / Gloves / LuckyCharm, with
+-- Costs / Cost fields). Map row -> Config entry so prices resolve.
+local SHOP_CONFIG_KEYS = { Speed = "Shoes", Glove = "Gloves", Luck = "LuckyCharm" }
 
 local GOLD = Color3.fromRGB(255, 215, 0)
 local PINK = Color3.fromRGB(255, 120, 200)
@@ -178,8 +179,8 @@ local carryCorner = Instance.new("UICorner")
 carryCorner.CornerRadius = UDim.new(0, 10)
 carryCorner.Parent = carryingLabel
 
--- Full-width alert banner (Sheriff Sweep warnings / busts), below the
--- carrying banner so the two never overlap.
+-- Full-width alert banner (event warnings, admin feedback toasts),
+-- below the carrying banner so the two never overlap.
 local alertLabel = Instance.new("TextLabel")
 alertLabel.Name = "AlertLabel"
 alertLabel.AnchorPoint = Vector2.new(0.5, 0)
@@ -201,15 +202,53 @@ alertCorner.CornerRadius = UDim.new(0, 10)
 alertCorner.Parent = alertLabel
 
 local alertToken = 0
-local function showAlert(text, color, seconds)
+local function showAlert(text, color, seconds, bgColor)
 	alertToken += 1
 	local token = alertToken
 	alertLabel.Text = text
 	alertLabel.TextColor3 = color
+	-- Always set the background (default: the dark-red event style) so
+	-- a green admin toast never leaves a red banner behind it or the
+	-- other way round.
+	alertLabel.BackgroundColor3 = bgColor or Color3.fromRGB(40, 8, 8)
 	alertLabel.Visible = true
 	task.delay(seconds, function()
 		if alertToken == token then
 			alertLabel.Visible = false
+		end
+	end)
+end
+
+-- Admin announcement banner: larger and centred on the play area —
+-- broadcasts go to every player, so they must be unmissable. Shown via
+-- the FX kind "announce" (server-side preset text only).
+local announceLabel = Instance.new("TextLabel")
+announceLabel.Name = "AnnounceLabel"
+announceLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+announceLabel.Position = UDim2.new(0.5, 0, 0.38, 0)
+announceLabel.Size = UDim2.new(0, 760, 0, 84)
+announceLabel.BackgroundColor3 = Color3.fromRGB(24, 16, 48)
+announceLabel.BackgroundTransparency = 0.15
+announceLabel.BorderSizePixel = 0
+announceLabel.Font = Enum.Font.FredokaOne
+announceLabel.TextSize = 34
+announceLabel.TextColor3 = Color3.fromRGB(255, 220, 90)
+announceLabel.TextWrapped = true
+announceLabel.Visible = false
+announceLabel.Parent = gui
+local announceCorner = Instance.new("UICorner")
+announceCorner.CornerRadius = UDim.new(0, 14)
+announceCorner.Parent = announceLabel
+
+local announceToken = 0
+local function showAnnounce(text)
+	announceToken += 1
+	local token = announceToken
+	announceLabel.Text = text
+	announceLabel.Visible = true
+	task.delay(3, function()
+		if announceToken == token then
+			announceLabel.Visible = false
 		end
 	end)
 end
@@ -265,8 +304,17 @@ local tokoButton = makeButton(gui, "TOKO", UDim2.new(0, 120, 0, 48), UDim2.new(1
 tokoButton.AnchorPoint = Vector2.new(0, 0)
 tokoButton.TextSize = 22
 
-local adminButton = makeButton(gui, "ADMIN", UDim2.new(0, 120, 0, 48), UDim2.new(1, -134, 0, 304), Color3.fromRGB(180, 30, 40))
-adminButton.TextSize = 22
+-- The admin entry point, deliberately unmissable: a big gold-outlined
+-- "⚙ ADMIN" button under the TOKO button. Visible ONLY to admins —
+-- refreshAdminVisibility runs the same Config.IsAdmin check the rest
+-- of the client uses; the button is pure UI, and the server re-checks
+-- IsAdmin on every single action it fires.
+local adminButton = makeButton(gui, "⚙ ADMIN", UDim2.new(0, 150, 0, 56), UDim2.new(1, -164, 0, 304), Color3.fromRGB(200, 36, 46))
+adminButton.TextSize = 24
+local adminButtonStroke = Instance.new("UIStroke")
+adminButtonStroke.Color = Color3.fromRGB(255, 200, 40)
+adminButtonStroke.Thickness = 2
+adminButtonStroke.Parent = adminButton
 adminButton.Visible = false
 
 local function refreshAdminVisibility()
@@ -319,6 +367,12 @@ local function priceList(entry)
 	if type(entry.Price) == "number" then
 		return { entry.Price }
 	end
+	if type(entry.Costs) == "table" then
+		return entry.Costs
+	end
+	if type(entry.Cost) == "number" then
+		return { entry.Cost }
+	end
 	local list = {}
 	for i, v in ipairs(entry) do
 		if type(v) == "number" then
@@ -334,10 +388,14 @@ local function refreshShop()
 		local row = shopRows[item.Key]
 		if row then
 			local level = player:GetAttribute("Shop" .. item.Key) or 0
+			if type(level) == "boolean" then
+				-- ShopGlove is a boolean attribute, not a level count.
+				level = level and 1 or 0
+			end
 			if type(level) ~= "number" then
 				level = 0
 			end
-			local prices = priceList(shop[item.Key])
+			local prices = priceList(shop[SHOP_CONFIG_KEYS[item.Key] or item.Key])
 			local nextPrice = prices[level + 1]
 			if item.Key == "Glove" and level >= 1 then
 				row.LevelLabel.Text = "DIMILIKI"
@@ -424,15 +482,18 @@ end)
 -- Admin panel (only for admins; server re-verifies every action)
 -- ---------------------------------------------------------------------------
 
-adminPanel = Instance.new("ScrollingFrame")
+-- The panel is a fixed outer frame (title + close always visible)
+-- with an inner scrolling frame for the sections — previously the
+-- title and close button were children of the scroller itself and
+-- scrolled away with the content, leaving no way to close the panel
+-- once you had scrolled down.
+adminPanel = Instance.new("Frame")
 adminPanel.Name = "AdminPanel"
 adminPanel.AnchorPoint = Vector2.new(0.5, 0.5)
 adminPanel.Position = UDim2.new(0.5, 0, 0.5, 0)
 adminPanel.Size = UDim2.new(0, 360, 0, 420)
 adminPanel.BackgroundColor3 = PANEL_BG
 adminPanel.BorderSizePixel = 0
-adminPanel.ScrollBarThickness = 6
-adminPanel.CanvasSize = UDim2.new(0, 0, 0, 60 + #ADMIN_ACTIONS * 52)
 adminPanel.Visible = false
 adminPanel.Parent = gui
 local adminCorner = Instance.new("UICorner")
@@ -443,20 +504,124 @@ adminStroke.Color = Color3.fromRGB(255, 60, 60)
 adminStroke.Thickness = 2
 adminStroke.Parent = adminPanel
 
-makeLabel(adminPanel, "ADMIN", UDim2.new(1, -20, 0, 36), UDim2.new(0, 16, 0, 10), 26, Color3.fromRGB(255, 90, 90))
+makeLabel(adminPanel, "ADMIN PANEL", UDim2.new(1, -20, 0, 36), UDim2.new(0, 16, 0, 10), 26, Color3.fromRGB(255, 90, 90))
 local adminClose = makeButton(adminPanel, "X", UDim2.new(0, 44, 0, 44), UDim2.new(1, -56, 0, 8), Color3.fromRGB(180, 30, 40))
 adminClose.TextSize = 22
 adminClose.MouseButton1Click:Connect(function()
 	adminPanel.Visible = false
 end)
 
-for i, action in ipairs(ADMIN_ACTIONS) do
-	local btn = makeButton(adminPanel, action, UDim2.new(1, -32, 0, 44), UDim2.new(0, 16, 0, 52 + (i - 1) * 52), Color3.fromRGB(90, 30, 40))
-	btn.TextSize = 18
-	btn.MouseButton1Click:Connect(function()
-		AdminEvent:FireServer(action)
-	end)
+local adminScroll = Instance.new("ScrollingFrame")
+adminScroll.Name = "AdminScroll"
+adminScroll.Position = UDim2.new(0, 0, 0, 54)
+adminScroll.Size = UDim2.new(1, 0, 1, -54)
+adminScroll.BackgroundTransparency = 1
+adminScroll.BorderSizePixel = 0
+adminScroll.ScrollBarThickness = 6
+adminScroll.Parent = adminPanel
+
+-- Complete panel: every admin action the server recognises, grouped
+-- into labelled sections with human-readable button text. The Action
+-- strings are the exact names the AdminEvent handler in
+-- init.server.luau dispatches on — do not rename them here. The panel
+-- only renders for admins (the ADMIN button is hidden otherwise) and
+-- the server re-checks IsAdmin — plus a shared 5s debounce for the
+-- event triggers — on every request, so this visibility is cosmetic.
+local ADMIN_SECTIONS = {
+	{
+		Title = "EVENTS",
+		Color = Color3.fromRGB(120, 80, 20),
+		Buttons = {
+			{ Text = "Spawn Golden", Action = "spawnGolden" },
+			{ Text = "Double Income 30s", Action = "doubleIncome" },
+			{ Text = "Rainbow Event", Action = "startRainbow" },
+			{ Text = "Mythic Event", Action = "startMythic" },
+			{ Text = "Spawn Boss", Action = "spawnBoss" },
+			{ Text = "End Event", Action = "endEvent" },
+		},
+	},
+	{
+		Title = "SERU & EVENT",
+		Color = Color3.fromRGB(170, 90, 30),
+		Buttons = {
+			{ Text = "🎆 Fireworks", Action = "fireworks" },
+			{ Text = "🚕 Rush Hour 60s", Action = "rushHour" },
+			{ Text = "💸 Cash Rain +500", Action = "cashRain" },
+		},
+	},
+	{
+		Title = "SPAWN",
+		Color = Color3.fromRGB(70, 40, 110),
+		Buttons = {
+			{ Text = "Spawn Legendary", Action = "spawnLegendary" },
+			{ Text = "Spawn Mythic", Action = "spawnMythic" },
+			{ Text = "Spawn Diamond", Action = "spawnDiamond" },
+			{ Text = "Spawn 5 Random", Action = "spawn5" },
+		},
+	},
+	{
+		Title = "CASH & PROGRESS",
+		Color = Color3.fromRGB(30, 110, 60),
+		Buttons = {
+			{ Text = "+$1,000", Action = "giveCash1000" },
+			{ Text = "+$10,000", Action = "addCash10k" },
+			{ Text = "+$1,000,000", Action = "addCash1m" },
+			{ Text = "+1 Rebirth", Action = "addRebirth" },
+			{ Text = "Toggle Speed", Action = "toggleSpeed" },
+		},
+	},
+	{
+		Title = "TELEPORT",
+		Color = Color3.fromRGB(40, 80, 140),
+		Buttons = {
+			{ Text = "Teleport: My Base", Action = "tpBase" },
+			{ Text = "Teleport: Lane", Action = "tpLane" },
+		},
+	},
+	{
+		Title = "ANNOUNCE",
+		Color = Color3.fromRGB(140, 90, 20),
+		Buttons = {
+			{ Text = "📣 Event Soon", Action = "announce1" },
+			{ Text = "☠ Boss Coming", Action = "announce2" },
+			{ Text = "⭐ Golden Hour", Action = "announce3" },
+		},
+	},
+	{
+		Title = "WORLD",
+		Color = Color3.fromRGB(30, 90, 120),
+		Buttons = {
+			{ Text = "Day / Night", Action = "toggleDayNight" },
+		},
+	},
+}
+
+local layoutY = 0
+for _, section in ipairs(ADMIN_SECTIONS) do
+	local band = Instance.new("Frame")
+	band.Name = "Section_" .. section.Title:gsub("[^%w]+", "")
+	band.Size = UDim2.new(1, -32, 0, 26)
+	band.Position = UDim2.new(0, 16, 0, layoutY)
+	band.BackgroundColor3 = Color3.fromRGB(16, 10, 28)
+	band.BorderSizePixel = 0
+	band.Parent = adminScroll
+	local bandCorner = Instance.new("UICorner")
+	bandCorner.CornerRadius = UDim.new(0, 8)
+	bandCorner.Parent = band
+	makeLabel(band, section.Title, UDim2.new(1, -16, 1, 0), UDim2.new(0, 10, 0, 0), 15, Color3.fromRGB(255, 190, 40))
+	layoutY += 26 + 8
+	for _, entry in ipairs(section.Buttons) do
+		local btn = makeButton(adminScroll, entry.Text, UDim2.new(1, -32, 0, 44), UDim2.new(0, 16, 0, layoutY), section.Color)
+		btn.Name = "Admin_" .. entry.Action
+		btn.TextSize = 17
+		btn.MouseButton1Click:Connect(function()
+			AdminEvent:FireServer(entry.Action)
+		end)
+		layoutY += 44 + 8
+	end
+	layoutY += 6
 end
+adminScroll.CanvasSize = UDim2.new(0, 0, 0, layoutY + 6)
 
 adminButton.MouseButton1Click:Connect(function()
 	adminPanel.Visible = not adminPanel.Visible
@@ -580,14 +745,57 @@ end)
 local shakeStrength = 0
 local shakeTime = 0
 
+-- Positional burst kinds the server fires at world positions. These
+-- had no client branch and fell through silently, so the particle
+-- bursts never rendered.
+local BURST_COLORS = {
+	gold = Color3.fromRGB(255, 190, 40),
+	deliver = Color3.fromRGB(80, 255, 130),
+	luckUp = Color3.fromRGB(120, 255, 170),
+	lucky = Color3.fromRGB(255, 110, 200),
+	luckyCash = Color3.fromRGB(255, 215, 80),
+	rebirth = Color3.fromRGB(170, 110, 255),
+	bossBoom = Color3.fromRGB(255, 90, 40),
+}
+
 FXEvent.OnClientEvent:Connect(function(message, strength)
 	if message == "Shake" then
 		shakeStrength = tonumber(strength) or 1
 		shakeTime = 0.45
-	elseif message == "sweepWarn" then
-		showAlert("⚠ SHERIFF SWEEP INCOMING — GET TO YOUR BASE!", Color3.fromRGB(255, 70, 60), 8)
-	elseif message == "busted" then
-		showAlert("BUSTED! The Sheriff sent you home.", Color3.fromRGB(255, 170, 60), 3)
+	elseif message == "adminToast" then
+		-- Server feedback for the acting admin only (fx is per-player):
+		-- the text rides in the second argument.
+		showAlert(tostring(strength), Color3.fromRGB(120, 255, 140), 2.2, Color3.fromRGB(16, 40, 20))
+	elseif message == "adminToastFail" then
+		showAlert(tostring(strength), Color3.fromRGB(255, 80, 70), 2.2)
+	elseif message == "golden" then
+		showAlert("⭐ GOLDEN BRAINROT ON THE LANE — GRAB IT!", Color3.fromRGB(255, 190, 40), 5)
+	elseif message == "doubleStart" then
+		showAlert("💰 DOUBLE INCOME — 30 SECONDS!", Color3.fromRGB(170, 255, 90), 4)
+	elseif message == "doubleEnd" then
+		showAlert("Double income ended.", Color3.fromRGB(170, 170, 170), 2)
+	elseif message == "rainbowStart" then
+		showAlert("🌈 RAINBOW RUSH — every spawn is Rainbow x10!", Color3.fromRGB(255, 110, 200), 5)
+	elseif message == "mythicStart" then
+		showAlert("👑 MYTHIC HUNT — Epic and better spawns only!", Color3.fromRGB(170, 80, 255), 5)
+	elseif message == "bossSpawn" then
+		showAlert("👹 BOSS APPEARED — slap it down for big cash!", Color3.fromRGB(255, 90, 40), 5)
+	elseif message == "announce" then
+		showAnnounce(tostring(strength))
+	elseif message == "incomePopup" then
+		local amount = tonumber(strength)
+		local char = player.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if amount and hrp then
+			Effects.IncomePopup(hrp.Position + Vector3.new(0, 3, 0), "+$" .. formatCash(amount))
+		end
+	elseif message == "openShop" then
+		openShop()
+	else
+		local burstColor = BURST_COLORS[message]
+		if burstColor and typeof(strength) == "Vector3" then
+			Effects.Burst(strength, burstColor)
+		end
 	end
 end)
 
@@ -635,6 +843,16 @@ end
 
 ReplicatedStorage:GetAttributeChangedSignal("EventKind"):Connect(applyEventFX)
 applyEventFX()
+
+-- Admin day/night flips the server-owned base clock; re-apply the BASE
+-- look when no event look is active (an active event keeps overriding
+-- and picks the new base up when it ends, via StopEventFX).
+ReplicatedStorage:GetAttributeChangedSignal("BaseClockTime"):Connect(function()
+	local kind = ReplicatedStorage:GetAttribute("EventKind")
+	if kind == nil or kind == "" then
+		Effects.SetupLighting()
+	end
+end)
 
 -- Overhead two-hand carry pose via shoulder Motor6D Transforms.
 local leftShoulder = nil
