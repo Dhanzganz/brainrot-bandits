@@ -8,8 +8,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 local DataStoreService = game:GetService("DataStoreService")
 local SoundService = game:GetService("SoundService")
-local Lighting = game:GetService("Lighting")
 local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local Debris = game:GetService("Debris")
 
 local shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(shared:WaitForChild("Config"))
@@ -61,6 +62,8 @@ local ShopBuy = getRemote("ShopBuy")
 ReplicatedStorage:SetAttribute("EventText", "")
 ReplicatedStorage:SetAttribute("EventKind", "")
 ReplicatedStorage:SetAttribute("EventEndsAt", 0)
+ReplicatedStorage:SetAttribute("BaseClockTime", 13.5)
+ReplicatedStorage:SetAttribute("RushHourEndsAt", 0)
 ReplicatedStorage:SetAttribute("BossHP", -1)
 
 -- BGM playlist ----------------------------------------------------------
@@ -104,14 +107,11 @@ local MAX_LANE = Config.Lane.MaxOnLane
 local SPAWN_INTERVAL = Config.Lane.SpawnInterval
 local LANE_MIN_GAP = 7 -- minimum studs of travel between consecutive lane walkers
 local REBIRTH_COSTS = Config.RebirthCosts
-local BOSS_INTERVAL = Config.BossInterval
 local BOSS_HEALTH = Config.BossHealth
-local EVENT_INTERVAL = Config.EventInterval
 local EVENT_DURATION = Config.EventDuration
-local SWEEP_INTERVAL = Config.Sweep.Interval
-local SWEEP_WARN_TIME = Config.Sweep.WarnTime
-local SWEEP_CROSS_TIME = Config.Sweep.CrossTime
-local SWEEP_SAFE_RADIUS = Config.Sweep.SafeRadius
+local EVENTS_INTERVAL = Config.Events.Interval
+local DOUBLE_DURATION = Config.Events.DoubleDuration
+local EVENT_ROTATION = Config.Events.Rotation
 local CARRY_SLOWDOWN = Config.CarrySlowMultiplier
 local DATASTORE_NAME = "BrainrotBandits_v1"
 
@@ -124,6 +124,17 @@ local CARRY_OFFSET_Y = 3.4 -- carried model height above the carrier's head
 local STEAL_DEBOUNCE = 1
 local BOSS_SLAP_DAMAGE = 5
 local BOSS_TIMEOUT = 180
+
+-- Exact stand height for a unit model: Factory measures each model's true
+-- ground clearance at build time (the "GroundClearance" attribute); the
+-- fixed ROOT_STAND_Y above is only a fallback for models built without it.
+local function standClearance(model)
+	local clearance = model and model:GetAttribute("GroundClearance")
+	if type(clearance) == "number" then
+		return clearance
+	end
+	return ROOT_STAND_Y
+end
 
 -- Rarity helpers --------------------------------------------------------
 local RARITY_ORDER = {}
@@ -185,6 +196,26 @@ local function rollRarity()
 	return rollRarityMin(1)
 end
 
+-- Golden event def: a shallow clone of an existing character def with a
+-- bargain price, multiplied income and a gold tint (honored by Factory).
+local function goldenDefFrom(baseDef)
+	if not baseDef then
+		return nil
+	end
+	local def = table.clone(baseDef)
+	def.Name = "GOLDEN " .. baseDef.Name
+	def.Price = Config.Events.GoldenPrice
+	def.Income = baseDef.Income * Config.Events.GoldenIncomeMult
+	def.Tint = Color3.fromRGB(255, 190, 40)
+	return def
+end
+
+local function randomGoldenDef()
+	local rarity = math.random(1, 2) == 1 and "Epic" or "Legendary"
+	local baseDef = randomCharDef(rarity) or randomCharDef("Rare")
+	return goldenDefFrom(baseDef)
+end
+
 -- State -----------------------------------------------------------------
 local playerData = {} -- [Player] = data table
 local baseMembers = {} -- [baseIndex] = { Players }
@@ -196,8 +227,21 @@ local laneChars = {} -- { {model, t0} }
 local danceSet = {} -- [Model] = { next, until, dancing }
 local boss = nil -- { model, hp, max, lastHit = { [Player] = clock } }
 local currentEvent = nil -- "Rainbow" | "Mythic" | nil
-local lastEventKind = "Mythic" -- first scheduled event alternates to Rainbow
 local eventEndsAt = 0
+local eventToken = 0 -- bumped on every event start/end; invalidates stale timed-end timers (same pattern as doubleToken)
+local incomeMult = 1 -- 2 while a Double Income fun event is running
+local doubleToken = 0 -- invalidates stale Double Income end timers
+local doubleActive = false -- a Double Income window is open
+local rushActive = false -- an admin Rush Hour is running
+local rushToken = 0 -- invalidates stale Rush Hour end timers
+local spawnIntervalNow = SPAWN_INTERVAL -- halved while Rush Hour runs
+-- The income multiplier is 2 while EITHER Double Income or Rush Hour
+-- is open, and never stacks past 2 — the two windows compose here,
+-- in exactly one place, instead of fighting over incomeMult.
+local function updateIncomeMult()
+	incomeMult = (doubleActive or rushActive) and 2 or 1
+end
+local lastAdminEventAt = {} -- [Player] = os.clock() of last admin event action
 
 -- Small helpers ---------------------------------------------------------
 local function setText(inst, text)
@@ -334,6 +378,10 @@ local onTakePad
 local onShopSell
 local registerDance
 local unregisterDance
+local triggerGolden
+local triggerDoubleIncome
+local triggerFireworks
+local triggerRushHour
 
 -- Player data / economy -------------------------------------------------
 local function padIncome(player)
@@ -547,6 +595,42 @@ local function releaseBase(player)
 	end
 end
 
+-- Animation handles -------------------------------------------------------
+-- Factory.StartWalk / Factory.PlayIdle return stop functions. Keep them
+-- per model (weak keys, so destroyed models clean up on their own) and
+-- always stop the previous animation before starting the next: dropping
+-- the handles left lane walkers swinging their legs forever after a
+-- claim, and stacked one more idle loop on a model at every state
+-- transition (pad -> carry -> pad -> ...), each writing root.Position
+-- with its own phase.
+local animStops = setmetatable({}, { __mode = "k" })
+local function stopAnims(model)
+	local stops = animStops[model]
+	if stops then
+		if stops.walk then
+			pcall(stops.walk)
+		end
+		if stops.idle then
+			pcall(stops.idle)
+		end
+		animStops[model] = nil
+	end
+end
+local function startWalkAnim(model)
+	stopAnims(model)
+	local ok, stop = pcall(Factory.StartWalk, model)
+	if ok and type(stop) == "function" then
+		animStops[model] = { walk = stop }
+	end
+end
+local function startIdleAnim(model)
+	stopAnims(model)
+	local ok, stop = pcall(Factory.PlayIdle, model)
+	if ok and type(stop) == "function" then
+		animStops[model] = { idle = stop }
+	end
+end
+
 -- Character placement ---------------------------------------------------
 placeOnPad = function(model, player, padIndex)
 	local data = playerData[player]
@@ -567,12 +651,13 @@ placeOnPad = function(model, player, padIndex)
 	if not padPart then
 		return false
 	end
-	model:PivotTo(CFrame.new(padPart.Position + Vector3.new(0, ROOT_STAND_Y, 0)))
+	local standY = padPart.Position.Y + padPart.Size.Y / 2 + standClearance(model)
+	model:PivotTo(CFrame.new(padPart.Position.X, standY, padPart.Position.Z))
 	model:SetAttribute("State", "pad")
 	model:SetAttribute("PadId", padIndex)
 	model:SetAttribute("Status", "Idle")
 	model:SetAttribute("FreeClaim", false)
-	pcall(Factory.PlayIdle, model)
+	startIdleAnim(model)
 	setPrompts(model, false, true, true, false)
 	local sell = getPrompt(model, "SellPrompt")
 	if sell then
@@ -593,7 +678,7 @@ carryModel = function(player, model)
 	model:SetAttribute("Status", "Idle")
 	model:SetAttribute("FreeClaim", false)
 	setPrompts(model, false, false, false, false)
-	pcall(Factory.PlayIdle, model)
+	startIdleAnim(model)
 	unregisterDance(model)
 	updateWalkSpeed(player)
 	syncPlayer(player)
@@ -845,6 +930,25 @@ attachCharPrompts = function(model)
 end
 
 -- Spawner ---------------------------------------------------------------
+-- The single lane-entry path: every unit on the lane — normal, admin or
+-- event — is built and registered here, so downstream claim / carry /
+-- deliver logic never special-cases where a unit came from.
+local function placeLaneModel(def, mutation)
+	if not def then
+		return nil
+	end
+	local model = Factory.new(def, mutation, 1)
+	model:SetAttribute("State", "lane")
+	model:SetAttribute("Status", "Walking")
+	model:SetAttribute("FreeClaim", false)
+	model.Parent = workspace
+	model:PivotTo(CFrame.new(LANE_START_X, 0.9 + standClearance(model), LANE_Z) * CFrame.Angles(0, math.rad(-90), 0))
+	attachCharPrompts(model)
+	startWalkAnim(model)
+	table.insert(laneChars, { model = model, t0 = os.clock(), dist = 0, clearance = model:GetAttribute("GroundClearance") })
+	return model
+end
+
 spawnLaneCharacter = function(forceRarity, forceMutation, allowOverCap)
 	if not allowOverCap and #laneChars >= MAX_LANE then
 		return nil
@@ -867,16 +971,7 @@ spawnLaneCharacter = function(forceRarity, forceMutation, allowOverCap)
 			end
 		end
 	end
-	local model = Factory.new(def, mutation, 1)
-	model:SetAttribute("State", "lane")
-	model:SetAttribute("Status", "Walking")
-	model:SetAttribute("FreeClaim", false)
-	model.Parent = workspace
-	model:PivotTo(CFrame.new(LANE_START_X, 0.9 + ROOT_STAND_Y, LANE_Z) * CFrame.Angles(0, math.rad(-90), 0))
-	attachCharPrompts(model)
-	pcall(Factory.StartWalk, model)
-	table.insert(laneChars, { model = model, t0 = os.clock(), dist = 0 })
-	return model
+	return placeLaneModel(def, mutation)
 end
 
 -- Deliver / steal -------------------------------------------------------
@@ -929,7 +1024,7 @@ dropCarried = function(victim, stealer)
 	if hrp then
 		dropPos = hrp.Position + hrp.CFrame.LookVector * 3
 	end
-	local y = groundHeightAt(dropPos) + ROOT_STAND_Y
+	local y = groundHeightAt(dropPos) + standClearance(model)
 	model:PivotTo(CFrame.new(dropPos.X, y, dropPos.Z))
 	model:SetAttribute("State", "dropped")
 	model:SetAttribute("Status", "Idle")
@@ -937,7 +1032,7 @@ dropCarried = function(victim, stealer)
 	model:SetAttribute("LastOwner", victim.UserId)
 	data.carrying = nil
 	setPrompts(model, true, false, false, false)
-	pcall(Factory.PlayIdle, model)
+	startIdleAnim(model)
 	registerDance(model)
 	updateWalkSpeed(victim)
 	syncPlayer(victim)
@@ -945,7 +1040,7 @@ dropCarried = function(victim, stealer)
 	if stealer then
 		sfx(stealer, "slap")
 	end
-	fx(victim, "shake", Vector3.new(dropPos.X, y, dropPos.Z))
+	fx(victim, "Shake", Vector3.new(dropPos.X, y, dropPos.Z))
 end
 
 -- Boss ------------------------------------------------------------------
@@ -1003,16 +1098,82 @@ spawnBoss = function()
 	if not def then
 		return
 	end
-	local model = Factory.new(def, nil, 5)
+	local model = Factory.new(def, nil, 6)
 	model:SetAttribute("State", "boss")
 	model:SetAttribute("Status", "Idle")
 	model.Parent = workspace
-	local y = groundHeightAt(Vector3.new(0, 0, 0)) + ROOT_STAND_Y * 5
+	local y = groundHeightAt(Vector3.new(0, 0, 0)) + standClearance(model)
 	model:PivotTo(CFrame.new(0, y, 0))
-	pcall(Factory.PlayIdle, model)
+	-- Nightmare restyle (appearance only — HP, damage, rewards and the
+	-- timeout below are untouched): charcoal body, blood-red accents,
+	-- glowing red eyes, horns, a dark smoke aura and a scary nameplate.
+	local bossRoot = model.PrimaryPart
+	for _, part in ipairs(model:GetDescendants()) do
+		if part:IsA("BasePart") then
+			if part.Name == "EyeL" or part.Name == "EyeR" then
+				part.Color = Color3.fromRGB(255, 35, 35)
+				part.Material = Enum.Material.Neon
+				part.Size = part.Size * 1.5
+			elseif part.Color == def.BodyColor then
+				part.Color = Color3.fromRGB(66, 60, 78)
+			elseif part.Color == def.AccentColor then
+				part.Color = Color3.fromRGB(120, 18, 24)
+			else
+				local lum = 0.299 * part.Color.R + 0.587 * part.Color.G + 0.114 * part.Color.B
+				if lum > 0.55 then
+					part.Color = Color3.fromRGB(70, 14, 18)
+				elseif lum < 0.12 then
+					-- Near-black parts (horns, dark trim) read as a black
+					-- blob against the sky; lift them to a dark slate.
+					part.Color = Color3.fromRGB(48, 42, 58)
+				end
+			end
+		end
+	end
+	if bossRoot then
+		local bossLight = Instance.new("PointLight")
+		bossLight.Color = Color3.fromRGB(255, 45, 45)
+		bossLight.Brightness = 1
+		bossLight.Range = 10
+		bossLight.Parent = bossRoot
+		for _, sideSign in ipairs({ -1, 1 }) do
+			local horn = Instance.new("Part")
+			horn.Name = "BossHorn"
+			horn.Size = Vector3.new(1.6, 3.2, 1.6)
+			horn.Color = Color3.fromRGB(18, 16, 20)
+			horn.Material = Enum.Material.SmoothPlastic
+			horn.Anchored = true
+			horn.CanCollide = false
+			horn.CanTouch = false
+			horn.CanQuery = false
+			local hornMesh = Instance.new("SpecialMesh")
+			hornMesh.MeshType = Enum.MeshType.FileMesh
+			hornMesh.MeshId = "rbxassetid://1033714"
+			hornMesh.Scale = Vector3.new(1.5, 3, 1.5)
+			hornMesh.Parent = horn
+			horn.CFrame = CFrame.new(bossRoot.Position + Vector3.new(sideSign * 0.6 * 6, 1.5 * 6, -0.2 * 6))
+				* CFrame.Angles(0, 0, math.rad(sideSign * -12))
+			horn.Parent = model
+		end
+		local aura = Instance.new("Smoke")
+		aura.Name = "BossAura"
+		aura.Color = Color3.fromRGB(140, 25, 30)
+		aura.Opacity = 0.3
+		aura.Size = 7
+		aura.RiseVelocity = 2.5
+		aura.Parent = bossRoot
+		local plate = bossRoot:FindFirstChild("Nameplate")
+		local nameLabel = plate and plate:FindFirstChild("NameLabel")
+		if nameLabel and nameLabel:IsA("TextLabel") then
+			nameLabel.Text = "☠ NIGHTMARE " .. def.Name
+			nameLabel.TextColor3 = Color3.fromRGB(255, 45, 45)
+		end
+	end
+	startIdleAnim(model)
 	boss = { model = model, hp = BOSS_HEALTH, max = BOSS_HEALTH, lastHit = {} }
 	ReplicatedStorage:SetAttribute("BossHP", 1)
 	sfxAll("boss")
+	fxAll("bossSpawn", model:GetPivot().Position)
 	for _, part in ipairs(model:GetDescendants()) do
 		if part:IsA("BasePart") then
 			part.Touched:Connect(function(otherPart)
@@ -1072,11 +1233,14 @@ giveLuckyReward = function(player)
 end
 
 -- Events + banner -------------------------------------------------------
-local originalLighting = {
-	Ambient = Lighting.Ambient,
-	OutdoorAmbient = Lighting.OutdoorAmbient,
-	FogColor = Lighting.FogColor,
-}
+-- Event lighting is owned by the client: Hud watches the EventKind
+-- attribute and Effects.StartEventFX / StopEventFX apply and restore
+-- the event look from the client's own snapshot. The server used to
+-- also write Lighting.Ambient / FogColor here and restore a boot-time
+-- snapshot on endEvent — two owners with different palettes, and the
+-- replicated server restore could stomp the client's base look after
+-- every event. These handlers now only publish state (attributes,
+-- banner, sfx/fx); they never touch Lighting.
 
 updateBanner = function()
 	local archText = "BRAINROT BANDITS"
@@ -1091,37 +1255,34 @@ updateBanner = function()
 			setText(world.BannerLabels[1], archText)
 		end
 		if world.BannerLabels[2] then
-			setText(world.BannerLabels[2], "Welcome to Brainrot Bandits!")
+			setText(world.BannerLabels[2], "BRAINROT BANDITS")
 		end
 	end
 end
 
 startEvent = function(kind)
+	eventToken += 1
 	currentEvent = kind
 	eventEndsAt = os.clock() + EVENT_DURATION
 	ReplicatedStorage:SetAttribute("EventKind", kind)
 	if kind == "Rainbow" then
 		ReplicatedStorage:SetAttribute("EventText", "🌈 RAINBOW RUSH — all spawns Rainbow x10!")
-		Lighting.Ambient = Color3.fromRGB(255, 180, 220)
-		Lighting.FogColor = Color3.fromRGB(255, 200, 230)
 	else
 		ReplicatedStorage:SetAttribute("EventText", "👑 MYTHIC HUNT — Epic+ spawns only!")
-		Lighting.Ambient = Color3.fromRGB(180, 140, 255)
-		Lighting.FogColor = Color3.fromRGB(120, 90, 200)
 	end
 	ReplicatedStorage:SetAttribute("EventEndsAt", os.time() + EVENT_DURATION)
 	updateBanner()
 	sfxAll("event")
+	fxAll(kind == "Rainbow" and "rainbowStart" or "mythicStart", nil)
+	return eventToken
 end
 
 endEvent = function()
+	eventToken += 1
 	currentEvent = nil
 	ReplicatedStorage:SetAttribute("EventKind", "")
 	ReplicatedStorage:SetAttribute("EventText", "")
 	ReplicatedStorage:SetAttribute("EventEndsAt", 0)
-	Lighting.Ambient = originalLighting.Ambient
-	Lighting.OutdoorAmbient = originalLighting.OutdoorAmbient
-	Lighting.FogColor = originalLighting.FogColor
 	updateBanner()
 end
 
@@ -1171,6 +1332,11 @@ applySave = function(player, blob)
 		for _, saved in ipairs(blob.pads) do
 			local padIndex = saved.pad
 			local def = saved.name and Config.GetCharacter(saved.name) or nil
+			if not def and saved.name and string.sub(saved.name, 1, 7) == "GOLDEN " then
+				-- Golden event units are runtime defs, not Config entries:
+				-- rebuild the golden def from its base character.
+				def = goldenDefFrom(Config.GetCharacter(string.sub(saved.name, 8)))
+			end
 			if def and padIndex and padIndex >= 1 and padIndex <= 6 and not data.pads[padIndex] then
 				local mutation = saved.mutation
 				if mutation == "" then
@@ -1299,9 +1465,21 @@ local function onPlayerRemoving(player)
 		end
 		data.carrying = nil
 		saveData(player)
+		-- Pad units are rebuilt from the save on rejoin; destroy the
+		-- live models (after saving — saveData reads their Parent) so
+		-- they don't linger on the base for its next owner, dancing
+		-- forever and duplicating when this player returns.
+		for _, entry in pairs(data.pads) do
+			if entry.model and entry.model.Parent then
+				unregisterDance(entry.model)
+				entry.model:Destroy()
+			end
+		end
+		data.pads = {}
 		releaseBase(player)
 	end
 	playerData[player] = nil
+	lastAdminEventAt[player] = nil
 end
 
 Players.PlayerAdded:Connect(onPlayerAdded)
@@ -1516,55 +1694,157 @@ ShopBuy.OnServerEvent:Connect(function(player, item)
 end)
 
 -- Admin (every action re-checked with Config.IsAdmin) -------------------
+-- Every handled action answers the acting admin with a feedback toast
+-- (fx kinds "adminToast" / "adminToastFail") so a tap never lands in
+-- silence; unknown actions and debounce-blocked taps get a red toast.
+-- Announcement presets live server-side so clients can only pick one of
+-- the three canned broadcasts, never free text.
+local ANNOUNCE_PRESETS = {
+	announce1 = "🎉 EVENT STARTING SOON!",
+	announce2 = "☠ A BOSS IS COMING…",
+	announce3 = "⭐ GOLDEN HOUR — RARE SPAWNS!",
+}
 AdminEvent.OnServerEvent:Connect(function(player, action)
 	if not Config.IsAdmin(player) then
 		return
 	end
 	local data = playerData[player]
+	local handled = false
+	local function toast(text)
+		fx(player, "adminToast", text)
+	end
+	local function toastFail(text)
+		fx(player, "adminToastFail", text)
+	end
+	-- Manual event controls: the same trigger functions the automatic
+	-- loops use, behind one shared 5s per-admin debounce.
+	if action == "spawnGolden" or action == "doubleIncome" or action == "giveCash1000" or action == "fireworks" or action == "rushHour" or action == "cashRain" or ANNOUNCE_PRESETS[action] then
+		local now = os.clock()
+		if lastAdminEventAt[player] and now - lastAdminEventAt[player] < 5 then
+			toastFail("✗ Too fast — 5s cooldown")
+			return
+		end
+		lastAdminEventAt[player] = now
+		if action == "spawnGolden" then
+			task.spawn(triggerGolden)
+			toast("✓ Golden brainrot spawned")
+		elseif action == "doubleIncome" then
+			triggerDoubleIncome()
+			toast("✓ Double income — 30 seconds")
+		elseif ANNOUNCE_PRESETS[action] then
+			fxAll("announce", ANNOUNCE_PRESETS[action])
+			toast("✓ Announcement sent")
+		elseif action == "giveCash1000" then
+			if data then
+				data.cash += 1000
+				syncPlayer(player)
+				toast("✓ +$1,000")
+			else
+				toastFail("✗ Action failed")
+			end
+		elseif action == "fireworks" then
+			task.spawn(triggerFireworks)
+			toast("✓ Fireworks")
+		elseif action == "rushHour" then
+			triggerRushHour()
+			toast("✓ Rush Hour — 60 seconds")
+		elseif action == "cashRain" then
+			-- Every player in the server gets +500, each with their
+			-- own income popup; the banner goes to everyone.
+			for _, p in ipairs(Players:GetPlayers()) do
+				local pdata = playerData[p]
+				if pdata then
+					pdata.cash += 500
+					syncPlayer(p)
+					fx(p, "incomePopup", 500)
+				end
+			end
+			fxAll("announce", "💸 CASH RAIN! +500 FOR EVERYONE")
+			toast("✓ Cash rain: +$500 for everyone")
+		end
+		return
+	end
 	if action == "addCash10k" then
 		if data then
 			data.cash += 10000
 			syncPlayer(player)
+			handled = "✓ +$10,000"
 		end
 	elseif action == "addCash1m" then
 		if data then
 			data.cash += 1000000
 			syncPlayer(player)
+			handled = "✓ +$1,000,000"
 		end
 	elseif action == "spawnLegendary" then
 		spawnLaneCharacter("Legendary", nil, true)
+		handled = "✓ Legendary spawned"
 	elseif action == "spawnMythic" then
 		spawnLaneCharacter("Mythic", nil, true)
+		handled = "✓ Mythic spawned"
 	elseif action == "spawnDiamond" then
 		spawnLaneCharacter(nil, "Diamond", true)
+		handled = "✓ Diamond spawned"
 	elseif action == "spawn5" then
 		for _ = 1, 5 do
 			spawnLaneCharacter(nil, nil, true)
 		end
+		handled = "✓ 5 random spawned"
 	elseif action == "startRainbow" then
 		startEvent("Rainbow")
+		handled = "✓ Rainbow event started"
 	elseif action == "startMythic" then
 		startEvent("Mythic")
+		handled = "✓ Mythic event started"
 	elseif action == "spawnBoss" then
+		local hadBoss = boss ~= nil
 		spawnBoss()
+		if not hadBoss and boss then
+			handled = "✓ Boss spawned"
+		elseif hadBoss then
+			toastFail("✗ Boss already active")
+			return
+		else
+			toastFail("✗ Boss spawn failed")
+			return
+		end
 	elseif action == "endEvent" then
 		endEvent()
+		handled = "✓ Event ended"
 	elseif action == "toggleSpeed" then
 		if data then
 			data.speedBoost = not data.speedBoost
 			updateWalkSpeed(player)
 			syncPlayer(player)
+			handled = data.speedBoost and "✓ Speed boost ON" or "✓ Speed boost OFF"
 		end
 	elseif action == "addRebirth" then
 		if data then
 			data.rebirths += 1
 			syncPlayer(player)
 			saveData(player)
+			handled = "✓ +1 Rebirth"
 		end
 	elseif action == "tpBase" then
 		teleportToBase(player)
+		handled = "✓ Teleported to base"
 	elseif action == "tpLane" then
 		teleportPlayer(player, Vector3.new(LANE_START_X, 3.5, LANE_Z))
+		handled = "✓ Teleported to lane"
+	elseif action == "toggleDayNight" then
+		-- Base-time override only: the attribute is what clients' Effects
+		-- BASE look reads, so event looks still override while active and
+		-- the flip back restores this base time, not a hard-coded one.
+		local current = ReplicatedStorage:GetAttribute("BaseClockTime") or 0.2
+		local nextTime = (current == 14) and 0.2 or 14
+		ReplicatedStorage:SetAttribute("BaseClockTime", nextTime)
+		Lighting.ClockTime = nextTime
+		handled = nextTime == 14 and "✓ Day mode" or "✓ Night mode"
+	end
+	if handled then
+		toast(handled)
+	else
+		toastFail("✗ Action failed")
 	end
 end)
 
@@ -1596,7 +1876,7 @@ RunService.Heartbeat:Connect(function()
 				table.remove(laneChars, i)
 			else
 				local x = LANE_START_X + entry.dist
-				model:PivotTo(CFrame.new(x, 0.9 + ROOT_STAND_Y, LANE_Z) * CFrame.Angles(0, math.rad(-90), 0))
+				model:PivotTo(CFrame.new(x, 0.9 + (entry.clearance or standClearance(model)), LANE_Z) * CFrame.Angles(0, math.rad(-90), 0))
 				leaderDist = entry.dist
 				i += 1
 			end
@@ -1615,10 +1895,10 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- Loops -----------------------------------------------------------------
--- Spawner
+-- Spawner (interval is read every cycle: Rush Hour halves it live)
 task.spawn(function()
 	while true do
-		task.wait(SPAWN_INTERVAL)
+		task.wait(spawnIntervalNow)
 		spawnLaneCharacter(nil, nil, false)
 	end
 end)
@@ -1632,7 +1912,7 @@ task.spawn(function()
 		for _, player in ipairs(Players:GetPlayers()) do
 			local data = playerData[player]
 			if data then
-				local income = padIncome(player) * rebirthMult(player)
+				local income = padIncome(player) * rebirthMult(player) * incomeMult
 				if income > 0 then
 					data.cash += income
 					if tick % 5 == 0 then
@@ -1668,110 +1948,173 @@ task.spawn(function()
 	end
 end)
 
--- Events: alternate Rainbow Rush / Mythic Hunt, 60s every 180s.
-task.spawn(function()
-	while true do
-		task.wait(EVENT_INTERVAL)
-		local kind = lastEventKind == "Rainbow" and "Mythic" or "Rainbow"
-		lastEventKind = kind
-		startEvent(kind)
-		task.wait(EVENT_DURATION)
-		endEvent()
-	end
-end)
+-- (Rainbow Rush / Mythic Hunt and the boss used to run on their own
+-- scheduler loops; they are slots in the unified event director below.)
 
--- Boss every 360s.
-task.spawn(function()
-	while true do
-		task.wait(BOSS_INTERVAL)
-		spawnBoss()
-	end
-end)
-
--- Sheriff Sweep: a red wall crosses the arena along +X every
--- SWEEP_INTERVAL seconds. Anyone it passes who is not within
--- SWEEP_SAFE_RADIUS of their own base centre is busted: they drop what
--- they carry and are sent home.
-local sweepWall = Instance.new("Part")
-sweepWall.Name = "SheriffSweepWall"
-sweepWall.Size = Vector3.new(4, 40, 400)
-sweepWall.Color = Color3.fromRGB(255, 40, 40)
-sweepWall.Material = Enum.Material.Neon
-sweepWall.Transparency = 1
-sweepWall.Anchored = true
-sweepWall.CanCollide = false
-sweepWall.CanTouch = false
-sweepWall.CanQuery = false
-sweepWall.CFrame = CFrame.new(-190, -60, 0)
-sweepWall.Parent = workspace
-
-local function sweepIsSafe(player, data, hrp)
-	if not data or not data.baseIndex then
-		return false
-	end
-	local base = world.Bases[data.baseIndex]
-	if not base or not base.CFrame then
-		return false
-	end
-	local centre = base.CFrame.Position
-	local dx = hrp.Position.X - centre.X
-	local dz = hrp.Position.Z - centre.Z
-	return (dx * dx + dz * dz) <= SWEEP_SAFE_RADIUS * SWEEP_SAFE_RADIUS
-end
-
-local function sweepBust(player)
-	local data = playerData[player]
-	if not data then
+-- Fun events: Golden Brainrot + Double Income. The trigger functions
+-- are shared with the admin panel's event buttons.
+triggerGolden = function()
+	local def = randomGoldenDef()
+	if not def then
 		return
 	end
-	if data.carrying then
-		dropCarried(player, nil)
+	local ok, model = pcall(placeLaneModel, def, nil)
+	if ok and model then
+		fxAll("golden", model:GetPivot().Position)
+		sfxAll("event")
 	end
-	teleportToBase(player)
-	fx(player, "busted", nil)
+end
+
+triggerDoubleIncome = function()
+	doubleToken += 1
+	local token = doubleToken
+	doubleActive = true
+	updateIncomeMult()
+	fxAll("doubleStart", nil)
+	sfxAll("event")
+	task.delay(DOUBLE_DURATION, function()
+		-- A retrigger (director or admin) supersedes this timer.
+		if doubleToken == token then
+			doubleActive = false
+			updateIncomeMult()
+			fxAll("doubleEnd", nil)
+		end
+	end)
+end
+
+-- Fireworks (admin "SERU & EVENT"): five anchored, invisible
+-- anchors high above the plaza's north side carry particle emitters
+-- that burst in waves for ~15 seconds. Pure show — no gameplay
+-- state — and Debris removes the anchors afterwards.
+local FIREWORK_POINTS = {
+	Vector3.new(-21, 27, -14), Vector3.new(-7, 31, -27),
+	Vector3.new(7, 29, -14), Vector3.new(21, 27, -27),
+	Vector3.new(0, 33, -20),
+}
+local FIREWORK_COLORS = {
+	Color3.fromRGB(255, 90, 90), Color3.fromRGB(255, 190, 60),
+	Color3.fromRGB(90, 220, 255), Color3.fromRGB(150, 255, 130),
+	Color3.fromRGB(220, 130, 255), Color3.fromRGB(255, 130, 200),
+}
+triggerFireworks = function()
+	fxAll("announce", "🎆 FIREWORKS!")
+	sfxAll("event")
+	local anchors = {}
+	for i, point in ipairs(FIREWORK_POINTS) do
+		local anchor = Instance.new("Part")
+		anchor.Name = "BanditsFirework"
+		anchor.Anchored = true
+		anchor.CanCollide = false
+		anchor.CanQuery = false
+		anchor.CanTouch = false
+		anchor.Transparency = 1
+		anchor.Size = Vector3.new(1, 1, 1)
+		anchor.CFrame = CFrame.new(point)
+		anchor.Parent = workspace
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Color = ColorSequence.new(FIREWORK_COLORS[((i - 1) % #FIREWORK_COLORS) + 1])
+		emitter.Size = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1.1),
+			NumberSequenceKeypoint.new(1, 0),
+		})
+		emitter.Lifetime = NumberRange.new(0.7, 1.3)
+		emitter.Speed = NumberRange.new(9, 17)
+		emitter.SpreadAngle = Vector2.new(180, 180)
+		emitter.Rate = 0
+		emitter.LightEmission = 0.85
+		emitter.Parent = anchor
+		table.insert(anchors, emitter)
+		Debris:AddItem(anchor, 18)
+	end
+	task.spawn(function()
+		for wave = 1, 9 do
+			for j, emitter in ipairs(anchors) do
+				if wave == 1 or (wave + j) % 2 == 0 then
+					emitter.Color = ColorSequence.new(FIREWORK_COLORS[((wave + j - 1) % #FIREWORK_COLORS) + 1])
+					emitter:Emit(28)
+				end
+			end
+			task.wait(1.6)
+		end
+	end)
+end
+
+-- Rush Hour (admin "SERU & EVENT"): 60 seconds of halved lane spawn
+-- interval and doubled income. The income side composes with Double
+-- Income through updateIncomeMult (2 while either window is open,
+-- never more), and the end timer is rushToken-guarded exactly like
+-- doubleToken, so a retrigger supersedes the old timer cleanly.
+triggerRushHour = function()
+	rushToken += 1
+	local token = rushToken
+	rushActive = true
+	spawnIntervalNow = SPAWN_INTERVAL / 2
+	updateIncomeMult()
+	ReplicatedStorage:SetAttribute("RushHourEndsAt", os.time() + 60)
+	fxAll("announce", "🚕 RUSH HOUR! Fast spawns + double income — 60 seconds!")
+	sfxAll("event")
+	task.delay(60, function()
+		if rushToken == token then
+			rushActive = false
+			spawnIntervalNow = SPAWN_INTERVAL
+			updateIncomeMult()
+			ReplicatedStorage:SetAttribute("RushHourEndsAt", 0)
+			fxAll("announce", "Rush Hour over — back to normal.")
+		end
+	end)
+end
+
+-- Unified event director: one rotation (Config.Events.Rotation) drives
+-- every live event on the EVENTS_INTERVAL beat — golden brainrot,
+-- double income, Rainbow Rush, Mythic Hunt and the boss. Every slot
+-- calls the same trigger functions the admin panel uses, so scheduled
+-- and manual events behave identically. Rainbow/Mythic run for
+-- EVENT_DURATION; the delayed end only fires if that same event is
+-- still the active one, so an admin endEvent or a different event
+-- started meanwhile is never cut short. The boss slot spawns the boss
+-- only on alternating full passes through the rotation and falls back
+-- to a golden spawn on the passes in between.
+local function runTimedEvent(kind)
+	local ok, token = pcall(startEvent, kind)
+	if not ok then
+		return
+	end
+	task.delay(EVENT_DURATION, function()
+		-- Only end the event this timer started: if an admin ended it
+		-- and started a fresh event of the same kind meanwhile, the
+		-- token has moved on and the new event keeps its full run.
+		if currentEvent == kind and eventToken == token then
+			endEvent()
+		end
+	end)
 end
 
 task.spawn(function()
+	local slot = 0
+	local cycle = 0
 	while true do
-		task.wait(SWEEP_INTERVAL)
-		fxAll("sweepWarn", nil)
-		task.wait(SWEEP_WARN_TIME)
-		local caught = {}
-		local steps = math.max(1, math.floor(SWEEP_CROSS_TIME / 0.1))
-		sweepWall.Transparency = 0.35
-		for s = 0, steps do
-			local wallX = -190 + 380 * (s / steps)
-			sweepWall.CFrame = CFrame.new(wallX, 20, 0)
-			for _, player in ipairs(Players:GetPlayers()) do
-				if not caught[player] then
-					local ok, passed = pcall(function()
-						local data = playerData[player]
-						if not data then
-							return false
-						end
-						local char = player.Character
-						local hrp = char and char:FindFirstChild("HumanoidRootPart")
-						local hum = char and char:FindFirstChildOfClass("Humanoid")
-						if not hrp or not hum or hum.Health <= 0 then
-							return false
-						end
-						return hrp.Position.X <= wallX
-					end)
-					if ok and passed then
-						caught[player] = true
-						local data = playerData[player]
-						local char = player.Character
-						local hrp = char and char:FindFirstChild("HumanoidRootPart")
-						if data and hrp and not sweepIsSafe(player, data, hrp) then
-							pcall(sweepBust, player)
-						end
-					end
-				end
-			end
-			task.wait(0.1)
+		task.wait(EVENTS_INTERVAL)
+		slot += 1
+		if slot > #EVENT_ROTATION then
+			slot = 1
+			cycle += 1
 		end
-		sweepWall.Transparency = 1
-		sweepWall.CFrame = CFrame.new(-190, -60, 0)
+		local kind = EVENT_ROTATION[slot]
+		if kind == "golden" then
+			pcall(triggerGolden)
+		elseif kind == "double" then
+			pcall(triggerDoubleIncome)
+		elseif kind == "rainbow" then
+			runTimedEvent("Rainbow")
+		elseif kind == "mythic" then
+			runTimedEvent("Mythic")
+		elseif kind == "boss" then
+			if cycle % 2 == 0 then
+				pcall(spawnBoss)
+			else
+				pcall(triggerGolden)
+			end
+		end
 	end
 end)
 
@@ -1789,17 +2132,14 @@ task.spawn(function()
 		table.sort(ranked, function(a, b)
 			return a.cash > b.cash
 		end)
-		local lines = {}
-		for i = 1, math.min(5, #ranked) do
-			table.insert(lines, string.format("%d. %s — $%d", i, ranked[i].name, ranked[i].cash))
-		end
-		local text = table.concat(lines, "\n")
+		-- Rows only: world.RichestLabel is the board's TITLE label
+		-- ("RICHEST BANDITS") — writing the joined ranking into it
+		-- stomped the title with a squeezed duplicate of these rows.
 		if world.RichestLabels then
 			for i, label in ipairs(world.RichestLabels) do
 				setText(label, ranked[i] and string.format("%d. %s — $%d", i, ranked[i].name, ranked[i].cash) or "")
 			end
 		end
-		setText(world.RichestLabel, text)
 		updateBanner()
 	end
 end)
