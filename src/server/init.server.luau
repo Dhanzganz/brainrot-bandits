@@ -102,6 +102,7 @@ local LANE_WIDTH = Config.Lane.Width
 local LANE_WALK_SECONDS = Config.Lane.WalkTime
 local MAX_LANE = Config.Lane.MaxOnLane
 local SPAWN_INTERVAL = Config.Lane.SpawnInterval
+local LANE_MIN_GAP = 7 -- minimum studs of travel between consecutive lane walkers
 local REBIRTH_COSTS = Config.RebirthCosts
 local BOSS_INTERVAL = Config.BossInterval
 local BOSS_HEALTH = Config.BossHealth
@@ -603,6 +604,25 @@ removeLane = function(model)
 	end
 end
 
+-- Proximity guard: ProximityPrompt.Triggered can be fired by exploiters
+-- from any distance, so location-bound prompt actions re-check on the
+-- server that the player is actually standing next to the target.
+local function isNearPart(player, part, maxDist)
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp or not part then
+		return false
+	end
+	return (hrp.Position - part.Position).Magnitude <= maxDist
+end
+
+local function isNearModel(player, model, maxDist)
+	if not model then
+		return false
+	end
+	return isNearPart(player, model.PrimaryPart or model:FindFirstChild("Root"), maxDist)
+end
+
 -- Claim / sell / take / shop-sell ---------------------------------------
 onClaim = function(model, player)
 	local data = playerData[player]
@@ -614,6 +634,9 @@ onClaim = function(model, player)
 		return
 	end
 	if not model or not model.Parent then
+		return
+	end
+	if not isNearModel(player, model, 18) then
 		return
 	end
 	local state = model:GetAttribute("State")
@@ -682,6 +705,9 @@ onSellPad = function(model, player)
 	if not data then
 		return
 	end
+	if not isNearModel(player, model, 18) then
+		return
+	end
 	if model:GetAttribute("State") ~= "pad" then
 		return
 	end
@@ -707,6 +733,9 @@ end
 onTakePad = function(model, player)
 	local data = playerData[player]
 	if not data or data.carrying then
+		return
+	end
+	if not isNearModel(player, model, 18) then
 		return
 	end
 	if model:GetAttribute("State") ~= "pad" then
@@ -842,7 +871,7 @@ spawnLaneCharacter = function(forceRarity, forceMutation, allowOverCap)
 	model:PivotTo(CFrame.new(LANE_START_X, 0.9 + ROOT_STAND_Y, LANE_Z) * CFrame.Angles(0, math.rad(-90), 0))
 	attachCharPrompts(model)
 	pcall(Factory.StartWalk, model)
-	table.insert(laneChars, { model = model, t0 = os.clock() })
+	table.insert(laneChars, { model = model, t0 = os.clock(), dist = 0 })
 	return model
 end
 
@@ -1284,26 +1313,33 @@ end)
 
 -- World wiring: delivery zones, shop zone, shrine, lucky stands --------
 for i, base in ipairs(world.Bases) do
+	local function tryDeliver(otherPart)
+		local player = Players:GetPlayerFromCharacter(otherPart.Parent)
+		if not player then
+			return
+		end
+		local data = playerData[player]
+		if not data or not data.carrying then
+			return
+		end
+		if data.baseIndex ~= i then
+			return
+		end
+		local now = os.clock()
+		if data.lastDeliverAt and now - data.lastDeliverAt < 1 then
+			return
+		end
+		data.lastDeliverAt = now
+		deliverCharacter(player)
+	end
 	if base.DeliveryZone then
-		base.DeliveryZone.Touched:Connect(function(otherPart)
-			local player = Players:GetPlayerFromCharacter(otherPart.Parent)
-			if not player then
-				return
-			end
-			local data = playerData[player]
-			if not data or not data.carrying then
-				return
-			end
-			if data.baseIndex ~= i then
-				return
-			end
-			local now = os.clock()
-			if data.lastDeliverAt and now - data.lastDeliverAt < 1 then
-				return
-			end
-			data.lastDeliverAt = now
-			deliverCharacter(player)
-		end)
+		base.DeliveryZone.Touched:Connect(tryDeliver)
+	end
+	-- Forgiving delivery: stepping on any of your own pads also delivers.
+	if base.Pads then
+		for _, pad in ipairs(base.Pads) do
+			pad.Touched:Connect(tryDeliver)
+		end
 	end
 end
 
@@ -1359,8 +1395,15 @@ if shopPrompt then
 	end)
 end
 
-local shrinePrompt = ensurePrompt(world.ShrinePrompt, "Rebirth", "Reset Cash — keep pads — income x(1+Rebirths)", 0.5)
+local function withCommas(n: number): string
+	local s = tostring(math.floor(n))
+	local grouped = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+	return (grouped:gsub("^,", ""))
+end
+
+local shrinePrompt = ensurePrompt(world.ShrinePrompt, "Rebirth", "Rebirth · $" .. withCommas(REBIRTH_COSTS[1]), 0.5)
 if shrinePrompt then
+	shrinePrompt.ObjectText = "Rebirth · $" .. withCommas(REBIRTH_COSTS[1])
 	shrinePrompt.Triggered:Connect(function(player)
 		local data = playerData[player]
 		if not data then
@@ -1381,7 +1424,12 @@ if shrinePrompt then
 		sfx(player, "rebirth")
 		fx(player, "rebirth", Vector3.new(0, 3, 34))
 		if shrinePrompt:IsA("ProximityPrompt") then
-			shrinePrompt.ObjectText = "Rebirth — now x" .. tostring(1 + data.rebirths)
+			local nextCost = REBIRTH_COSTS[data.rebirths + 1]
+			if nextCost then
+				shrinePrompt.ObjectText = "Rebirth · $" .. withCommas(nextCost)
+			else
+				shrinePrompt.ObjectText = "Rebirth — now x" .. tostring(1 + data.rebirths)
+			end
 		end
 		saveData(player)
 	end)
@@ -1394,6 +1442,9 @@ if world.LuckyStands then
 			prompt.Triggered:Connect(function(player)
 				local data = playerData[player]
 				if not data then
+					return
+				end
+				if not isNearPart(player, stand.Counter, 16) then
 					return
 				end
 				local now = os.clock()
@@ -1514,21 +1565,36 @@ AdminEvent.OnServerEvent:Connect(function(player, action)
 end)
 
 -- Heartbeat: lane walking, despawn at lane end, carry follow ------------
+local lastLaneTick = nil
 RunService.Heartbeat:Connect(function()
 	local now = os.clock()
-	for i = #laneChars, 1, -1 do
+	local dt = lastLaneTick and (now - lastLaneTick) or 0
+	lastLaneTick = now
+	local laneLength = LANE_END_X - LANE_START_X
+	local laneSpeed = laneLength / LANE_WALK_SECONDS
+	-- Each walker advances its own travel distance, clamped to stay at
+	-- least LANE_MIN_GAP studs behind the walker ahead of it, so units
+	-- can never catch up, overlap, or stack their nameplates.
+	local leaderDist = nil
+	local i = 1
+	while i <= #laneChars do
 		local entry = laneChars[i]
 		local model = entry.model
 		if not model or not model.Parent then
 			table.remove(laneChars, i)
 		else
-			local alpha = (now - entry.t0) / LANE_WALK_SECONDS
-			if alpha >= 1 then
+			entry.dist = (entry.dist or 0) + laneSpeed * dt
+			if leaderDist then
+				entry.dist = math.max(0, math.min(entry.dist, leaderDist - LANE_MIN_GAP))
+			end
+			if entry.dist >= laneLength then
 				model:Destroy()
 				table.remove(laneChars, i)
 			else
-				local x = LANE_START_X + (LANE_END_X - LANE_START_X) * alpha
+				local x = LANE_START_X + entry.dist
 				model:PivotTo(CFrame.new(x, 0.9 + ROOT_STAND_Y, LANE_Z) * CFrame.Angles(0, math.rad(-90), 0))
+				leaderDist = entry.dist
+				i += 1
 			end
 		end
 	end

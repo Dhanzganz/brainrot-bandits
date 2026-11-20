@@ -140,7 +140,7 @@ gui.Parent = player:WaitForChild("PlayerGui")
 local stats = Instance.new("Frame")
 stats.Name = "StatsPanel"
 stats.AnchorPoint = Vector2.new(1, 0)
-stats.Position = UDim2.new(1, -14, 0, 14)
+stats.Position = UDim2.new(1, -14, 0, 78)
 stats.Size = UDim2.new(0, 250, 0, 118)
 stats.BackgroundColor3 = Color3.fromRGB(20, 14, 34)
 stats.BackgroundTransparency = 0.25
@@ -160,16 +160,17 @@ local rebirthLabel = makeLabel(stats, "Rebirth: 0  (x1)", UDim2.new(1, -16, 0, 2
 
 local carryingLabel = Instance.new("TextLabel")
 carryingLabel.Name = "CarryingLabel"
-carryingLabel.AnchorPoint = Vector2.new(1, 0)
-carryingLabel.Position = UDim2.new(1, -14, 0, 140)
-carryingLabel.Size = UDim2.new(0, 250, 0, 36)
+carryingLabel.AnchorPoint = Vector2.new(0.5, 0)
+carryingLabel.Position = UDim2.new(0.5, 0, 0, 84)
+carryingLabel.Size = UDim2.new(0, 600, 0, 40)
 carryingLabel.BackgroundColor3 = Color3.fromRGB(20, 14, 34)
 carryingLabel.BackgroundTransparency = 0.25
 carryingLabel.BorderSizePixel = 0
 carryingLabel.Font = Enum.Font.FredokaOne
-carryingLabel.TextSize = 16
+carryingLabel.TextSize = 18
 carryingLabel.TextColor3 = PINK
 carryingLabel.TextStrokeTransparency = 0.4
+carryingLabel.TextXAlignment = Enum.TextXAlignment.Center
 carryingLabel.TextWrapped = true
 carryingLabel.Visible = false
 carryingLabel.Parent = gui
@@ -197,7 +198,7 @@ local function refreshStats()
 
 	local carrying = player:GetAttribute("Carrying")
 	if carrying and carrying ~= "" then
-		carryingLabel.Text = "Carrying: " .. tostring(carrying) .. " — deliver it home!"
+		carryingLabel.Text = "Carrying: " .. tostring(carrying) .. " — deliver it to the GREEN ZONE at your base!"
 		carryingLabel.Visible = true
 	else
 		carryingLabel.Visible = false
@@ -224,11 +225,11 @@ refreshStats()
 -- Right-side buttons: TOKO + ADMIN
 -- ---------------------------------------------------------------------------
 
-local tokoButton = makeButton(gui, "TOKO", UDim2.new(0, 120, 0, 48), UDim2.new(1, -134, 0, 184), Color3.fromRGB(120, 60, 160))
+local tokoButton = makeButton(gui, "TOKO", UDim2.new(0, 120, 0, 48), UDim2.new(1, -134, 0, 248), Color3.fromRGB(120, 60, 160))
 tokoButton.AnchorPoint = Vector2.new(0, 0)
 tokoButton.TextSize = 22
 
-local adminButton = makeButton(gui, "ADMIN", UDim2.new(0, 120, 0, 48), UDim2.new(1, -134, 0, 240), Color3.fromRGB(180, 30, 40))
+local adminButton = makeButton(gui, "ADMIN", UDim2.new(0, 120, 0, 48), UDim2.new(1, -134, 0, 304), Color3.fromRGB(180, 30, 40))
 adminButton.TextSize = 22
 adminButton.Visible = false
 
