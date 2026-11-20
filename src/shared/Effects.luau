@@ -11,21 +11,36 @@ local Debris = game:GetService("Debris")
 local Effects = {}
 
 -- ---------------------------------------------------------------------------
--- Base look: warm late-afternoon. Snapshot so events can restore it.
+-- Base look: bright daytime (R27b — the owner ordered the night gone:
+-- "langitnya terangin aja jangan malam"). Snapshot so events can
+-- restore it.
 -- ---------------------------------------------------------------------------
 
 local BASE = {
-	ClockTime = 15,
-	FogColor = Color3.fromRGB(250, 217, 179),
-	FogStart = 200,
-	FogEnd = 800,
-	Brightness = 2,
-	Ambient = Color3.fromRGB(153, 140, 128),
-	OutdoorAmbient = Color3.fromRGB(179, 153, 128),
-	ExposureCompensation = -0.15,
-	BloomIntensity = 0.25,
-	ColorCorrectionSaturation = 0.26,
+	ClockTime = 13.5,
+	FogColor = Color3.fromRGB(168, 196, 232),
+	FogStart = 300,
+	FogEnd = 900,
+	Brightness = 2.2,
+	Ambient = Color3.fromRGB(140, 155, 190),
+	OutdoorAmbient = Color3.fromRGB(170, 185, 215),
+	ExposureCompensation = 0,
+	BloomIntensity = 0.05,
+	ColorCorrectionSaturation = 0.15,
 }
+
+-- The server owns the base time of day (admin day/night toggle); clients
+-- read it from a ReplicatedStorage attribute so an event look ending
+-- restores the CURRENT base time, not a hard-coded one.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local function baseClockTime()
+	local value = ReplicatedStorage:GetAttribute("BaseClockTime")
+	if type(value) == "number" then
+		return value
+	end
+	return BASE.ClockTime
+end
 
 local _snapshot = nil
 
@@ -59,7 +74,7 @@ local function snapshotLighting()
 end
 
 local function applyBaseToLighting()
-	Lighting.ClockTime = BASE.ClockTime
+	Lighting.ClockTime = baseClockTime()
 	Lighting.FogColor = BASE.FogColor
 	Lighting.FogStart = BASE.FogStart
 	Lighting.FogEnd = BASE.FogEnd
@@ -95,19 +110,19 @@ function Effects.SetupLighting()
 	cc.Saturation = BASE.ColorCorrectionSaturation
 	cc.Contrast = 0.05
 	cc.Brightness = 0.02
-	cc.TintColor = Color3.fromRGB(255, 244, 230)
+	cc.TintColor = Color3.fromRGB(255, 246, 235)
 
 	local rays = getOrCreate("SunRaysEffect", "BanditsSunRays")
-	rays.Intensity = 0.06
+	rays.Intensity = 0.08
 	rays.Spread = 0.7
 
 	local atmo = getOrCreate("Atmosphere", "BanditsAtmosphere")
 	atmo.Density = 0.25
 	atmo.Offset = 0.2
-	atmo.Color = Color3.fromRGB(255, 214, 170)
-	atmo.Decay = Color3.fromRGB(255, 190, 140)
+	atmo.Color = Color3.fromRGB(168, 196, 232)
+	atmo.Decay = Color3.fromRGB(120, 150, 200)
 	atmo.Glare = 0.25
-	atmo.Haze = 1.5
+	atmo.Haze = 1.2
 
 	snapshotLighting()
 end
@@ -438,6 +453,10 @@ function Effects.StopEventFX()
 	else
 		applyBaseToLighting()
 	end
+	-- Whatever the snapshot held, the base clock follows the server's
+	-- current BaseClockTime (an admin may have flipped day/night while
+	-- the event look was up).
+	Lighting.ClockTime = baseClockTime()
 end
 
 return Effects

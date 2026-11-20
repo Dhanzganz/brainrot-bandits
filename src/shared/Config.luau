@@ -192,7 +192,7 @@ Config.Lane = {
 }
 
 Config.BaseCount = 6
-Config.BaseRadius = 80
+Config.BaseRadius = 60
 Config.BaseAngles = { 30, 90, 150, 210, 270, 330 }
 Config.PadsPerBase = 6
 
@@ -200,9 +200,9 @@ Config.ShrinePosition = Vector3.new(0, 0, 34)
 
 -- Three lucky stands on the north side of the plaza.
 Config.LuckyStandPositions = {
-	Vector3.new(-24, 0, -37),
-	Vector3.new(0, 0, -38),
-	Vector3.new(24, 0, -36),
+	Vector3.new(-24.1, 0, -34.4),
+	Vector3.new(0, 0, -42),
+	Vector3.new(24.1, 0, -34.4),
 }
 
 Config.RichestBoardPosition = Vector3.new(0, 0, 56)
@@ -235,14 +235,21 @@ Config.BossHealth = 120
 Config.EventInterval = 180
 Config.EventDuration = 60
 
--- Sheriff Sweep event: every Interval seconds a warning goes out, then a
--- red wall crosses the arena along +X. Players caught away from their own
--- base (SafeRadius studs from its centre) are sent home.
-Config.Sweep = {
-	Interval = 90,
-	WarnTime = 8,
-	CrossTime = 14,
-	SafeRadius = 16,
+-- Fun live events, driven by the unified event director in init.server
+-- and also triggerable from the admin panel: a GOLDEN brainrot (a cloned
+-- Epic/Legendary def at a bargain price with multiplied income and a
+-- gold tint), Double Income (all pad income x2 for the duration), the
+-- legacy Rainbow Rush / Mythic Hunt events (which run for
+-- Config.EventDuration) and the boss. One rotation slot fires every
+-- Interval seconds; the "boss" slot only spawns the boss on alternating
+-- full passes through the list and falls back to a golden spawn on the
+-- passes in between.
+Config.Events = {
+	Interval = 120,
+	DoubleDuration = 30,
+	GoldenPrice = 500,
+	GoldenIncomeMult = 5,
+	Rotation = { "golden", "double", "rainbow", "golden", "mythic", "double", "boss" },
 }
 
 -- Carrying a character makes the carrier walk 10% slower.
