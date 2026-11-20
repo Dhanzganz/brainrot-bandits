@@ -253,6 +253,14 @@ function World.build(): { [string]: any }
 		local plotRing = cylinder("PlotRing", 27, 0.15, Vector3.new(center.X, 1.0, center.Z), Color3.fromRGB(255, 200, 40), folder)
 		plotRing.Material = Enum.Material.Neon
 
+		-- Neon corner posts marking the plot's corners.
+		for _, corner in ipairs({ { -11, -11 }, { -11, 11 }, { 11, -11 }, { 11, 11 } }) do
+			local cornerPos = baseCFrame:PointToWorldSpace(Vector3.new(corner[1], 0, corner[2]))
+			local post = cylinder("CornerPost", 0.7, 1.6, Vector3.new(cornerPos.X, 1.3, cornerPos.Z), Color3.fromRGB(255, 200, 40), folder)
+			post.Material = Enum.Material.Neon
+			post.CanCollide = false
+		end
+
 		-- Six display pads in two rows of three, each with a PadIndex attribute.
 		local pads = {}
 		for padIndex = 1, Config.PadsPerBase do
@@ -270,9 +278,19 @@ function World.build(): { [string]: any }
 		-- Delivery zone: glowing strip at the base edge facing the centre.
 		local deliveryLocal = Vector3.new(0, 0, -11)
 		local deliveryPos = baseCFrame:PointToWorldSpace(deliveryLocal)
-		local delivery = part("DeliveryZone", Vector3.new(10, 0.4, 4), Vector3.new(deliveryPos.X, 1.1, deliveryPos.Z), Color3.fromRGB(80, 255, 130), Enum.Material.Neon, folder)
+		local delivery = part("DeliveryZone", Vector3.new(14, 0.4, 7), Vector3.new(deliveryPos.X, 1.1, deliveryPos.Z), Color3.fromRGB(80, 255, 130), Enum.Material.Neon, folder)
 		delivery.CanCollide = false
 		delivery.CanTouch = true
+
+		-- Floating label above the zone so carriers can spot it from afar.
+		local deliverGui = billboard("DeliverSign", UDim2.fromOffset(200, 50), Vector3.new(0, 4, 0), delivery)
+		local deliverFrame = Instance.new("Frame")
+		deliverFrame.Size = UDim2.new(1, 0, 1, 0)
+		deliverFrame.BackgroundColor3 = Color3.fromRGB(20, 40, 24)
+		deliverFrame.BorderSizePixel = 4
+		deliverFrame.BorderColor3 = Color3.fromRGB(80, 255, 130)
+		deliverFrame.Parent = deliverGui
+		label("DeliverLabel", "DELIVER HERE", UDim2.new(1, 0, 1, 0), 28, Color3.fromRGB(120, 255, 150), deliverFrame, true)
 
 		-- Owner sign: billboard on a beam showing the owner's display name
 		-- (or FOR RENT while unclaimed).
@@ -494,8 +512,6 @@ function World.build(): { [string]: any }
 		local mountain = wedge("Mountain" .. i, Vector3.new(40, 55, 40), Vector3.new(mx, 20, mz), Color3.fromRGB(120, 120, 135), decor)
 		mountain.Material = Enum.Material.Slate
 		mountain.CFrame = CFrame.new(mountain.Position) * CFrame.Angles(0, -angle, 0)
-		local cap = ball("SnowCap" .. i, 12, Vector3.new(mx, 46, mz), Color3.fromRGB(245, 245, 250), decor)
-		_ = cap
 	end
 
 	-- Clouds drifting high above.
@@ -505,9 +521,13 @@ function World.build(): { [string]: any }
 		cloud.Parent = decor
 		local cx = -90 + i * 36
 		local cz = -80 + (i % 3) * 55
-		ball("Puff1", 10, Vector3.new(cx, 55, cz), Color3.fromRGB(255, 255, 255), cloud).Material = Enum.Material.SmoothPlastic
-		ball("Puff2", 7, Vector3.new(cx + 6, 53, cz + 2), Color3.fromRGB(245, 245, 250), cloud)
-		ball("Puff3", 8, Vector3.new(cx - 6, 53, cz - 2), Color3.fromRGB(250, 250, 255), cloud)
+		local puff1 = ball("Puff1", 10, Vector3.new(cx, 61, cz), Color3.fromRGB(255, 255, 255), cloud)
+		puff1.Material = Enum.Material.SmoothPlastic
+		puff1.Transparency = 0.15
+		local puff2 = ball("Puff2", 7, Vector3.new(cx + 6, 59, cz + 2), Color3.fromRGB(245, 245, 250), cloud)
+		puff2.Transparency = 0.15
+		local puff3 = ball("Puff3", 8, Vector3.new(cx - 6, 59, cz - 2), Color3.fromRGB(250, 250, 255), cloud)
+		puff3.Transparency = 0.15
 	end
 
 	-- Street lamps along the lane.
