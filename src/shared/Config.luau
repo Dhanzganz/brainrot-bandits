@@ -235,6 +235,16 @@ Config.BossHealth = 120
 Config.EventInterval = 180
 Config.EventDuration = 60
 
+-- Sheriff Sweep event: every Interval seconds a warning goes out, then a
+-- red wall crosses the arena along +X. Players caught away from their own
+-- base (SafeRadius studs from its centre) are sent home.
+Config.Sweep = {
+	Interval = 90,
+	WarnTime = 8,
+	CrossTime = 14,
+	SafeRadius = 16,
+}
+
 -- Carrying a character makes the carrier walk 10% slower.
 Config.CarrySlowMultiplier = 0.90
 

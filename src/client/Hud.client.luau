@@ -178,6 +178,42 @@ local carryCorner = Instance.new("UICorner")
 carryCorner.CornerRadius = UDim.new(0, 10)
 carryCorner.Parent = carryingLabel
 
+-- Full-width alert banner (Sheriff Sweep warnings / busts), below the
+-- carrying banner so the two never overlap.
+local alertLabel = Instance.new("TextLabel")
+alertLabel.Name = "AlertLabel"
+alertLabel.AnchorPoint = Vector2.new(0.5, 0)
+alertLabel.Position = UDim2.new(0.5, 0, 0, 132)
+alertLabel.Size = UDim2.new(0, 720, 0, 44)
+alertLabel.BackgroundColor3 = Color3.fromRGB(40, 8, 8)
+alertLabel.BackgroundTransparency = 0.2
+alertLabel.BorderSizePixel = 0
+alertLabel.Font = Enum.Font.FredokaOne
+alertLabel.TextSize = 20
+alertLabel.TextColor3 = Color3.fromRGB(255, 70, 60)
+alertLabel.TextStrokeTransparency = 0.3
+alertLabel.TextXAlignment = Enum.TextXAlignment.Center
+alertLabel.TextWrapped = true
+alertLabel.Visible = false
+alertLabel.Parent = gui
+local alertCorner = Instance.new("UICorner")
+alertCorner.CornerRadius = UDim.new(0, 10)
+alertCorner.Parent = alertLabel
+
+local alertToken = 0
+local function showAlert(text, color, seconds)
+	alertToken += 1
+	local token = alertToken
+	alertLabel.Text = text
+	alertLabel.TextColor3 = color
+	alertLabel.Visible = true
+	task.delay(seconds, function()
+		if alertToken == token then
+			alertLabel.Visible = false
+		end
+	end)
+end
+
 local function refreshStats()
 	local leaderstats = player:FindFirstChild("leaderstats")
 	local cash = 0
@@ -548,6 +584,10 @@ FXEvent.OnClientEvent:Connect(function(message, strength)
 	if message == "Shake" then
 		shakeStrength = tonumber(strength) or 1
 		shakeTime = 0.45
+	elseif message == "sweepWarn" then
+		showAlert("⚠ SHERIFF SWEEP INCOMING — GET TO YOUR BASE!", Color3.fromRGB(255, 70, 60), 8)
+	elseif message == "busted" then
+		showAlert("BUSTED! The Sheriff sent you home.", Color3.fromRGB(255, 170, 60), 3)
 	end
 end)
 
